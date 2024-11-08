@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mapa con Ruta OTP - Arcgis 4.30</title>
+
+    <!-- Load Map Components from CDN-->
+    <link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/light/main.css">
+    <script src="https://js.arcgis.com/4.30/"></script>
+    <link rel="stylesheet" href="./globals.css">
+</head>
+
+<body>
+    <div id="sidebar">
+        <h2>Buscar Ruta</h2>
+        <!-- Tenemos el campo origen-->
+        <label for="origin">Origen:</label>
+        <input type="text" id="origin" placeholder="Ejemplo: Barakaldo" required>
+
+        <!-- Tenemos el campo destino-->
+        <label for="destination">Destino:</label>
+        <input type="text" id="destination" placeholder="Ejemplo: Gran via, 21" required>
+
+        <!-- Tenemos la posibilidad tambien de añadir la hora de nuestro viaje-->
+        <label for="dateTime">Fecha y hora prevista de tu viaje</label>
+        <input type="datetime-local" id="dateTime" value="2024-10-30T09:50">
+
+        <button id="btnSearchRoute">Buscar ruta</button>
+        
+        <!-- Contenedor para mostrar direcciones-->
+        <div id="directions"></div>
+    </div>
+
+    <!-- COntenedor MApa -->
+    <div id="viewDiv" style="height: 100vh;"></div>
+
+    <!-- Interactividad -->
+    <script>
+        // Load the Map and MapView modules
+        require(["esri/Map", "esri/views/MapView", "esri/Graphic", "esri/layers/GraphicsLayer", "esri/rest/locator"],
+            function (Map, MapView, Graphic, GraphicsLayer, Locator) {
+                // Create a Map instance
+                const myMap = new Map({
+                    basemap: "streets"
+                });
+
+                // Create a MapView instance (for 2D viewing) and reference the map instance
+                const view = new MapView({
+                    container: "viewDiv",
+                    center: [-2.9707, 43.2968],
+                    zoom: 9,
+                    map: myMap
+                });
+
+                const graphicsLayer = new GraphicsLayer();
+                myMap.add(graphicsLayer);
+
+                async function loadAllStops() {
+                    const query = {
+                        query: `
+                        query GtfsAllRoutesQuery {
+                            routes {
+                                shortName
+                                longName
+                                stops {
+                                    lon
+                                    lat
+                                    name
+                                }
+                            }
+                        }
+                    `
+                    }
+
+                    try {
+                        const response = await fetch("http://localhost:8080/otp/routers/default/index/graphql", {
+                            method: "POST",
+                            headers: {
+                                "content-type": "application/json"
+                            },
+                            body: JSON.stringify(query)
+                        });
+
+                        // Verificamos si la respuesta es correcta
+                        if (!response.ok) throw new Error("Eror en la respuesta de la API");
+
+                        // PArsear los datos de la nuestra respuesta
+                        const data = await response.json();
+                        const routes = data.data.routes;
+
+                        //console.log(routes);
+
+                        // Hemos simplificado un multiarray 
+                        const allStops = routes.flatMap(route => route.stops);
+                        //console.log(allStops);
+
+                        // Aqui llamamos a nuestra funcion de añadir paradas 
+                        addStopsToMap(allStops);
+                    } catch (error) {
+
+                    }
+                }
+
+                // Funcion para ñadir paradas al mapa
+                function addStopsToMap(stops) {
+                    stops.forEach(stop => {
+                        //console.log("Mis pardas lat y lon", stop.lon + " " + stop.lat);
+
+                        // HEMOS CREADO LOS PUNTOS EN BASE NUESTRAS LAT Y LON
+                        const stopPoint = {
+                            type: "point", // polyline, polygon
+                            longitude: stop.lon,
+                            latitude: stop.lat
+                        }
+
+                        // CREADO EL SYMBNOLO COMO SE VISUALIZAR NUESTRO PUNTO
+                        const markerSymbol = {
+                            type: "picture-marker", // autocasts as new SimpleMarkerSymbol()
+                            url: "./icon/bus-stop-icon.png",
+                            width: "24px",
+                            height: "24px"
+                        };
+
+                        // CREAR EL GRAFICO EN BASE A NUESTRO PUNTO Y COLOR
+                        const stopGraphic = new Graphic({
+                            geometry: stopPoint,
+                            symbol: markerSymbol,
+                        });
+
+                        // AÑADIRLO AL MAPA
+                        view.graphics.add(stopGraphic);
+                    });
+                }
+
+                // Probamos si funciona correctamente nuesta peticion a la API
+                window.btnSearchRoute.addEventListener('click', () => {
+                    loadAllStops();
+                    findRoute();
+                });
+
+                // Find route 
+                async function findRoute() {
+                    const orginPlace = document.getElementById('origin').value; // Ejemplo  Barakaldo
+                    const destinationPlace = window.destination.value; // Ejemplo  Bilbao
+                    const [date, time] = window.dateTime.value.split('T');
+                    const formattedDate = date;
+                    const fotmattedTime = time.substring(0, 5); // Formater la hora 
+
+                    try {
+
+                        // Geocodificar las ubicacions de origen y destinos
+                        const originCoordinates = await geocodePlace(orginPlace);
+                        const destinationCoordinates = await geocodePlace(destinationPlace);
+
+                        // Verificar si se encontraron las coordenadas
+                        if (!originCoordinates || !destinationCoordinates) {
+                            console.log("No se han podido encontrar las coordenadas para las respectivas ubicaciones");
+                            return;
+                        }
+
+                        // Consulta Graphql para calcular la ruta deseada
+                        const query = {
+                            query: `
+                        {
+                            plan(
+                                from: {
+                                    lat: ${originCoordinates.lat},
+                                    lon: ${originCoordinates.lon}
+                                },
+                                to: {
+                                    lat: ${destinationCoordinates.lat},
+                                    lon: ${destinationCoordinates.lon}
+                                },
+                                date: "${formattedDate}"
+                            ){
+                                itineraries {
+                                    start
+                                    end
+                                    legs{
+                                        mode
+                                        from{
+                                            name
+                                            lon
+                                            lat
+                                            departure {
+                                                scheduledTime
+                                                estimated {
+                                                    time
+                                                    delay
+                                                }
+                                            }
+                                        }
+                                        to{
+                                            name
+                                            lon
+                                            lat
+                                            arrival {
+                                                scheduledTime
+                                                estimated {
+                                                    time
+                                                    delay
+                                                }
+                                            }
+                                        }
+                                        route {
+                                            shortName
+                                            longName
+                                        }
+                                        legGeometry{
+                                            points
+                                        }
+                                    }
+                                }    
+                            }
+                        }
+                    `
+                        }
+
+
+                        // la peticion para obtener la ruta
+                        const response = await fetch("http://localhost:8080/otp/routers/default/index/graphql", {
+                            method: "POST",
+                            headers: {
+                                "content-type": "application/json"
+                            },
+                            body: JSON.stringify(query)
+                        });
+
+                        if (!response.ok) throw new Error("Error en la respuesta de la API");
+
+                        // Parsear los de la respuesta
+                        const data = await response.json();
+                        const itineraries = data.data.plan.itineraries;
+                        console.log(data)
+                        if (itineraries.length > 0) {
+                            displayItineraryOptions(itineraries, originCoordinates, destinationCoordinates)
+                            // Aqui estaba antes el drawRotues(legs)                       
+                        }
+
+                    } catch (error) {
+
+                    }
+                }
+
+                // funcion para mostrar opciones de itinerario
+                function displayItineraryOptions(itineraries, originCoordinates, destinationCoordinates) {
+                    const directionsContainer = window.directions;
+                    directionsContainer.innerHTML = `<h3>Opciones de ruta:</h3>`
+
+                    itineraries.forEach((intinerary, index) => {
+                        const button = document.createElement("button");
+                        button.innerText = `Itinerario ${index + 1}`;
+
+                        // Asignar el evento click a ese intinerario
+                        button.addEventListener('click', () => {
+                            const legs = intinerary.legs;
+                            graphicsLayer.removeAll(); // limpiar los intinerarios ya dibujados anteriormente seleccionados
+
+                            directionsContainer.innerHTML = "<h3> Itinerario Seleccionado:</h3>"
+                            // Dibuja la ruta
+                            drawRoute(legs);
+                            // Dibujar el punto || icono de inicio
+                            addOriginMarker(originCoordinates)
+                            // Mostrar las instrucciones
+                            displayDirections(legs);
+                            // Dibujar el punto de fin de la ruta
+                            addStopMarker(destinationCoordinates);
+                        });
+                        directionsContainer.appendChild(button);
+                    })
+                }
+
+
+                // Funcin para mostrar las instrucciones de cada "Itinerario" de la ruta seleccionada
+                function displayDirections(legs) {
+                    const directionsContainer = window.directions;
+                    directionsContainer.innerHTML = "<h4> Instrucciones: </h4>";
+
+                    legs.forEach((leg) => {
+                        const setepDiv = document.createElement("div");
+                        setepDiv.className = "step";
+
+                        // Obtener el nombre  de la ruta o asignar un valor por defecto!!
+                        const routeName = leg.route
+                            ? (leg.route.shortName || leg.route.longName || "Ruta sin nombre")
+                            : "Sin ruta disponible";
+
+                        // Descripcion del modo de transporte
+                        const legDecription = leg.mode == 'WALK'
+                            ? 'Caminar'
+                            : (leg.mode == "TRANSIT" || leg.mode == "BUS")
+                                ? 'Transporte publico'
+                                : "Otro modo de transporte";
+
+                        // Crear contenido para las instrucciones
+                        setepDiv.innerHTML = `
+                            <strong>${routeName}</strong><br>
+                            Modo: ${legDecription}<br>
+                            Desde: ${leg.from.name}<br>
+                            Hasta: ${leg.to.name}<br>
+                            Salida: ${new Date(leg.from.departure.scheduledTime).toLocaleString()}<br>
+                            Llegada: ${new Date(leg.to.arrival.scheduledTime).toLocaleString()}
+                        `;
+                        setepDiv.classList.add(leg.mode.toLowerCase())
+                        directionsContainer.appendChild(setepDiv);
+                    })
+                }
+
+                // Funcion que ñade el icono de origen al mapa
+                function addOriginMarker (coordinates){
+                    const originPoint = {
+                        type: "point",
+                        longitude: coordinates.lon,
+                        latitude: coordinates.lat
+                    }
+
+                    // Definir el suimbolo del icono de origen
+                    const symbolOrigin = {
+                        type: "picture-marker",
+                        url: "./icon/start.jpeg",
+                        width: "60px",
+                        height: "60px",
+                    }
+
+                    // Crear el grafico de origen y añadirlo al mapa
+                    const originGraphic = new Graphic({
+                        geometry: originPoint,
+                        symbol: symbolOrigin
+                    });
+
+                    graphicsLayer.add(originGraphic);
+                }
+
+
+                 // Funcion que ñade el icono de origen al mapa
+                 function addStopMarker (stops){
+                    const endPoint = {
+                        type: "point",
+                        longitude: stops.lon,
+                        latitude: stops.lat
+                    }
+
+                    // Definir el suimbolo del icono de origen
+                    const symbolEnd = {
+                        type: "picture-marker",
+                        url: "./icon/end.jpeg",
+                        width: "60px",
+                        height: "60px",
+                    }
+
+                    // Crear el grafico de origen y añadirlo al mapa
+                    const endGraphic = new Graphic({
+                        geometry: endPoint,
+                        symbol: symbolEnd
+                    });
+
+                    graphicsLayer.add(endGraphic);
+                }
+
+                // Funcion para geocodificar un lugar y obter sus coordenadas
+                async function geocodePlace(place) {
+                    return new Promise((resolve, reject) => {
+                        Locator.addressToLocations("https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer", {
+                            address: {
+                                "SingleLine": place //Barakaldo
+                            },
+                            outFields: ["*"]
+                        }).then((result) => {
+                            if (result.length > 0) {
+                                console.log(result);
+                                // Necesitamos dibujar esa lista de resultados
+                                displayGeocodingResults(result, place, resolve, reject)
+                            } else {
+                                // AQUI MANDAMOS EL ERROR O NO HAY DATOS
+                                reject("No se encontraron coordenadas de:" + place);
+                            }
+                        }).catch((error) => {
+                            console.error("Error en la geocodificacion:", error);
+                            reject(error);
+                        })
+                    })
+                }
+
+                // Funcion para mostrar los resultados de la geocodificacion
+                function displayGeocodingResults(results, place, resolve, reject) {
+                    const resultContainer = document.createElement("div");
+                    resultContainer.className = "results"
+                    resultContainer.innerHTML = `<h4> Resultado para: ${place}</h4>`
+
+                    // Procesar cada resultada de geocodificacion
+                    results.forEach((result) => {
+                        const resultDiv = document.createElement("div");
+                        resultDiv.className = "results"
+                        resultDiv.textContent = result.address; // mostrando la direccion
+
+                        // Agregamos evento clic para la seleccion de ubicacion 
+                        // BARAKALDO, 1
+                        // BARakldo, 2 
+
+                        resultDiv.addEventListener('click', () => {
+                            const { location } = result;
+                            console.log(location);
+                            resolve({ lat: location.y, lon: location.x }); // Resoulta la promesa con las coordenadas
+                            window.directions.removeChild(resultContainer); // Limpiar el resultado de esa geocodifcacion 
+                        })
+
+                        resultContainer.appendChild(resultDiv); // Añadimos el reusltado a nuestro contenedor
+                    });
+
+                    // Agreagar el contenedor de nuestro resultado a l DOM
+                    window.directions.appendChild(resultContainer);
+                }
+
+                // FUncion para dibujar la ruta en el mapa
+                function drawRoute(legs) {
+                    legs.forEach(leg => {
+                        const decodePoints = decodePolyline(leg.legGeometry.points);
+
+                        const routeLine = {
+                            type: "polyline",
+                            paths: decodePoints.map(point => [point[1], point[0]]) // convertir a [longitud y latitud]
+                        }
+
+                        //Definir una simbologia segun el modo de transporte
+                        // WALK ....  Bus _______________
+
+                        const rotueSymbol = {
+                            type: "simple-line",
+                            color: leg.mode === "WALK" ? [0, 255, 0] : [255, 0, 0],
+                            width: "4pt",
+                            style: leg.mode === "WALK" ? "dot" : "solid",
+                            cap: "round",
+                            join: "round"
+                        }
+
+
+                        const routeLineGraphics = new Graphic({
+                            geometry: routeLine,
+                            symbol: rotueSymbol
+                        })
+
+                        graphicsLayer.add(routeLineGraphics);
+                    });
+                }
+
+                function decodePolyline(ecode) {
+                    console.log("ecode", ecode);
+                    const coordinates = [];
+                    let index = 0, len = ecode.length;
+                    let lat = 0, lon = 0;
+
+                    while (index < len) {
+                        let b, shift = 0, result = 0;
+
+                        // Decodificar latitud
+                        do {
+                            b = ecode.charCodeAt(index++) - 63; // Obtener el valor de cada caracter
+                            result |= (b & 0x1f) << shift; // Acumular el resultado
+                            shift += 5; // Incrementar el desplazamiento
+                        } while (b >= 0x20); // Continuar si el caracter está en rango
+
+                        const dlat = (result >> 1) ^ -(result & 1);
+                        lat += dlat; // Actualizar la latitud acumulada
+
+                        shift = 0;
+                        result = 0;
+
+                        // Decodificar longitud
+                        do {
+                            b = ecode.charCodeAt(index++) - 63;
+                            result |= (b & 0x1f) << shift; // Acumular el resultado
+                            shift += 5; // Incrementar el desplazamiento
+                        } while (b >= 0x20);
+
+                        const dlng = (result >> 1) ^ -(result & 1);
+                        lon += dlng; // Actualizar la longitud acumulada
+
+                        // Agregar coordenadas decodificadas a la lista
+                        coordinates.push([lat * 1e-5, lon * 1e-5]);
+                    }
+
+                    return coordinates;
+                }
+
+            });
+    </script>
+
+</body>
+
+</html>
